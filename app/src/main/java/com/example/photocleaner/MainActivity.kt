@@ -1,9 +1,13 @@
 package com.example.photocleaner
 
 import android.Manifest
+import android.app.DownloadManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.ContentUris
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -11,7 +15,9 @@ import android.graphics.ImageDecoder
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.provider.MediaStore
+import android.provider.Settings
 import android.animation.ObjectAnimator
 import android.util.LruCache
 import android.view.Gravity
@@ -36,12 +42,14 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.isVisible
 import com.google.android.material.button.MaterialButton
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.text.DecimalFormat
 import java.text.SimpleDateFormat
 import java.net.HttpURLConnection
@@ -111,7 +119,8 @@ class MainActivity : AppCompatActivity() {
         val releaseTitle: String,
         val notes: String,
         val htmlUrl: String,
-        val downloadUrl: String?
+        val downloadUrl: String?,
+        val assetName: String?
     )
 
     private enum class ActionType {
@@ -241,6 +250,17 @@ class MainActivity : AppCompatActivity() {
 
     private val preferences by lazy { getSharedPreferences(PREFS_NAME, MODE_PRIVATE) }
     private val historyRecords = mutableListOf<HistoryRecord>()
+    private val downloadManager by lazy { getSystemService(DOWNLOAD_SERVICE) as DownloadManager }
+    private var updateDownloadId: Long = -1L
+    private var pendingInstallFileName: String? = null
+    private val downloadCompleteReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != DownloadManager.ACTION_DOWNLOAD_COMPLETE) return
+            val downloadId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+            if (downloadId != updateDownloadId || downloadId == -1L) return
+            handleUpdateDownloadComplete(downloadId)
+        }
+    }
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -279,6 +299,11 @@ class MainActivity : AppCompatActivity() {
         setupInsets()
         setupListeners()
         setupBackNavigation()
+        registerReceiver(
+            downloadCompleteReceiver,
+            IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
+            Context.RECEIVER_NOT_EXPORTED
+        )
         startShimmerAnimation()
         updateThemeToggleText()
         updateWelcomeSummary()
@@ -287,11 +312,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        unregisterReceiver(downloadCompleteReceiver)
         worker.shutdownNow()
         imageWorker.shutdownNow()
         smartThumbWorker.shutdownNow()
         updateWorker.shutdownNow()
         super.onDestroy()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        pendingInstallFileName?.takeIf { packageManager.canRequestPackageInstalls() }?.let {
+            installDownloadedApk(it)
+        }
     }
 
     private fun bindViews() {
@@ -1450,7 +1483,9 @@ class MainActivity : AppCompatActivity() {
                 val notes = json.optString("body")
                 val releaseTitle = json.optString("name").ifBlank { "v$versionLabel" }
                 val assets = json.optJSONArray("assets")
-                val downloadUrl = assets?.optJSONObject(0)?.optString("browser_download_url")?.takeIf { it.isNotBlank() }
+                val firstAsset = assets?.optJSONObject(0)
+                val downloadUrl = firstAsset?.optString("browser_download_url")?.takeIf { it.isNotBlank() }
+                val assetName = firstAsset?.optString("name")?.takeIf { it.isNotBlank() }
                 if (versionLabel.isBlank() || htmlUrl.isBlank()) {
                     null
                 } else {
@@ -1459,7 +1494,8 @@ class MainActivity : AppCompatActivity() {
                         releaseTitle = releaseTitle,
                         notes = notes,
                         htmlUrl = htmlUrl,
-                        downloadUrl = downloadUrl
+                        downloadUrl = downloadUrl,
+                        assetName = assetName
                     )
                 }
             }
@@ -1505,17 +1541,109 @@ class MainActivity : AppCompatActivity() {
             .setTitle(updateInfo.releaseTitle)
             .setMessage(message)
             .setNegativeButton("稍后", null)
-            .setPositiveButton("前往下载") { _, _ ->
-                openExternalUrl(updateInfo.downloadUrl ?: updateInfo.htmlUrl)
+            .setPositiveButton("立即下载") { _, _ ->
+                startInAppUpdateDownload(updateInfo)
             }
             .show()
     }
 
-    private fun openExternalUrl(url: String) {
+    private fun startInAppUpdateDownload(updateInfo: UpdateInfo) {
+        val downloadUrl = updateInfo.downloadUrl
+        val assetName = updateInfo.assetName
+        if (downloadUrl.isNullOrBlank() || assetName.isNullOrBlank()) {
+            showToast("当前版本暂时没有可下载的安装包")
+            return
+        }
+        val destinationDir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+        if (destinationDir == null) {
+            showToast("暂时无法创建下载目录")
+            return
+        }
+        File(destinationDir, assetName).delete()
+        val request = DownloadManager.Request(Uri.parse(downloadUrl)).apply {
+            setTitle("下载更新 ${updateInfo.versionLabel}")
+            setDescription("正在下载 ${assetName}")
+            setMimeType(APK_MIME_TYPE)
+            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            setAllowedOverMetered(true)
+            setAllowedOverRoaming(true)
+            setDestinationInExternalFilesDir(
+                this@MainActivity,
+                Environment.DIRECTORY_DOWNLOADS,
+                assetName
+            )
+        }
+        updateDownloadId = downloadManager.enqueue(request)
+        pendingInstallFileName = assetName
+        showToast("已开始下载更新包")
+    }
+
+    private fun handleUpdateDownloadComplete(downloadId: Long) {
+        val query = DownloadManager.Query().setFilterById(downloadId)
+        downloadManager.query(query)?.use { cursor ->
+            if (!cursor.moveToFirst()) {
+                showToast("更新下载结果读取失败")
+                return
+            }
+            val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+            updateDownloadId = -1L
+            if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                val fileName = pendingInstallFileName
+                if (fileName.isNullOrBlank()) {
+                    showToast("下载完成，但未找到安装包")
+                    return
+                }
+                showToast("下载完成，准备安装更新")
+                installDownloadedApk(fileName)
+            } else {
+                pendingInstallFileName = null
+                showToast("更新下载失败，请稍后重试")
+            }
+        } ?: run {
+            updateDownloadId = -1L
+            pendingInstallFileName = null
+            showToast("更新下载失败，请稍后重试")
+        }
+    }
+
+    private fun installDownloadedApk(fileName: String) {
+        if (!packageManager.canRequestPackageInstalls()) {
+            pendingInstallFileName = fileName
+            AlertDialog.Builder(this)
+                .setTitle("需要安装权限")
+                .setMessage("请允许“相册清理助手”安装未知应用，授权后会继续安装更新。")
+                .setNegativeButton("稍后", null)
+                .setPositiveButton("去授权") { _, _ ->
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:$packageName")
+                        )
+                    )
+                }
+                .show()
+            return
+        }
+        val downloadDir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: run {
+            showToast("未找到已下载的安装包")
+            return
+        }
+        val apkFile = File(downloadDir, fileName)
+        if (!apkFile.exists()) {
+            showToast("未找到已下载的安装包")
+            return
+        }
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apkFile)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, APK_MIME_TYPE)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
         runCatching {
-            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            startActivity(intent)
+            pendingInstallFileName = null
         }.onFailure {
-            showToast("暂时无法打开下载页面")
+            showToast("暂时无法打开安装界面")
         }
     }
 
@@ -1792,6 +1920,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         private const val LATEST_RELEASE_API_URL = "https://api.github.com/repos/DZHAPPY/PhotoCleaner/releases/latest"
         private const val MAX_REVIEW_BATCH = 20
         private const val MAX_SMART_ITEMS = 60
