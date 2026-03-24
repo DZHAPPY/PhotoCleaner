@@ -31,6 +31,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -143,6 +144,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var startButton: MaterialButton
     private lateinit var startButtonShimmer: View
     private lateinit var historyButton: MaterialButton
+    private lateinit var themeToggleButton: MaterialButton
 
     private lateinit var smartBackButton: ImageButton
     private lateinit var smartTitleText: TextView
@@ -166,7 +168,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var photoMetaText: TextView
     private lateinit var photoTagsContainer: LinearLayout
     private lateinit var swipeGuideText: TextView
-    private lateinit var undoButton: TextView
+    private lateinit var undoButton: ImageView
     private lateinit var deleteButton: TextView
     private lateinit var keepButton: TextView
     private lateinit var skipButton: TextView
@@ -243,6 +245,7 @@ class MainActivity : AppCompatActivity() {
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        applySavedThemeMode()
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContentView(R.layout.activity_main)
@@ -252,6 +255,7 @@ class MainActivity : AppCompatActivity() {
         setupListeners()
         setupBackNavigation()
         startShimmerAnimation()
+        updateThemeToggleText()
         updateWelcomeSummary()
         showScreen(Screen.WELCOME, addToBackStack = false)
         preloadWelcomeDataIfPermitted()
@@ -283,6 +287,8 @@ class MainActivity : AppCompatActivity() {
         startButton = findViewById(R.id.startButton)
         startButtonShimmer = findViewById(R.id.startButtonShimmer)
         historyButton = findViewById(R.id.historyButton)
+        themeToggleButton = findViewById(R.id.themeToggleButton)
+
         smartBackButton = findViewById(R.id.smartBackButton)
         smartTitleText = findViewById(R.id.smartTitleText)
         smartSubtitleText = findViewById(R.id.smartSubtitleText)
@@ -339,6 +345,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupListeners() {
         startButton.setOnClickListener { requestPermissionAndStartRandomReview() }
+        themeToggleButton.setOnClickListener { toggleThemeMode() }
         historyButton.setOnClickListener {
             runCatching { updateHistoryUi() }
                 .onFailure { showToast("整理记录暂时加载失败，请稍后再试") }
@@ -1047,16 +1054,17 @@ class MainActivity : AppCompatActivity() {
     private fun updateReviewProgress() {
         val done = reviewStats.keptCount + reviewStats.markedDeleteCount + reviewStats.skippedCount
         val percent = if (currentBatchSize == 0) 0 else done * 100 / currentBatchSize
+        val progressValue = if (currentBatchSize == 0) 0 else done * 1000 / currentBatchSize
         progressAnimator?.cancel()
-        progressAnimator = ObjectAnimator.ofInt(progressBar, "progress", progressBar.progress, percent).apply {
-            duration = 520L
+        progressAnimator = ObjectAnimator.ofInt(progressBar, "progress", progressBar.progress, progressValue).apply {
+            duration = 640L
             interpolator = AccelerateDecelerateInterpolator()
             start()
         }
         progressDoneText.text = "已处理 $done 张"
         progressPercentText.text = "$percent%"
         viewerCounterText.text = if (currentBatchSize == 0) "0 / 0" else "${min(done + 1, currentBatchSize)} / $currentBatchSize"
-        undoButton.alpha = if (reviewHistory.isEmpty()) 0.45f else 1f
+        undoButton.alpha = if (reviewHistory.isEmpty()) 0.72f else 1f
     }
 
     private fun updateResultUi() {
@@ -1461,6 +1469,29 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 
+    private fun applySavedThemeMode() {
+        val mode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getInt(KEY_THEME_MODE, AppCompatDelegate.MODE_NIGHT_YES)
+        AppCompatDelegate.setDefaultNightMode(mode)
+    }
+
+    private fun toggleThemeMode() {
+        val nextMode = if (AppCompatDelegate.getDefaultNightMode() == AppCompatDelegate.MODE_NIGHT_YES) {
+            AppCompatDelegate.MODE_NIGHT_NO
+        } else {
+            AppCompatDelegate.MODE_NIGHT_YES
+        }
+        preferences.edit().putInt(KEY_THEME_MODE, nextMode).apply()
+        AppCompatDelegate.setDefaultNightMode(nextMode)
+        updateThemeToggleText()
+    }
+
+    private fun updateThemeToggleText() {
+        val isDark = resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK ==
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+        themeToggleButton.text = if (isDark) "☀ 日间" else "🌙 夜间"
+    }
+
     private fun dp(value: Int): Int {
         return (value * resources.displayMetrics.density).toInt()
     }
@@ -1543,6 +1574,7 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_DELETED_TOTAL = "deleted_total"
         private const val KEY_FREED_TOTAL = "freed_total"
         private const val KEY_HISTORY_JSON = "history_json"
+        private const val KEY_THEME_MODE = "theme_mode"
         private val DAY_LABELS = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
     }
 }
