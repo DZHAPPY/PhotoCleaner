@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg_primary">#06060A</color>
+    <color name="surface">#0F0F16</color>
+    <color name="surface_2">#17171F</color>
+    <color name="surface_3">#1F1F2A</color>
+    <color name="surface_4">#282836</color>
+    <color name="accent_keep">#22C55E</color>
+    <color name="accent_keep_dark">#16A34A</color>
+    <color name="accent_delete">#EF4444</color>
+    <color name="accent_warm">#F59E0B</color>
+    <color name="accent_blue">#3B82F6</color>
+    <color name="accent_purple">#A855F7</color>
+    <color name="text_primary">#F0EEE8</color>
+    <color name="text_secondary">#9A97A0</color>
+    <color name="text_muted">#5C5A63</color>
+    <color name="border">#14FFFFFF</color>
+    <color name="progress_track">#2A2A34</color>
+    <color name="action_undo_tint">#F5F0EB</color>
+    <color name="action_keep_tint">#F5F0EB</color>
+    <color name="action_delete_tint">#F5F0EB</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>
