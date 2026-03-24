@@ -3,6 +3,7 @@ package com.example.photocleaner
 import android.Manifest
 import android.app.PendingIntent
 import android.content.ContentUris
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -12,6 +13,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
 import android.animation.ObjectAnimator
+import android.util.LruCache
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -30,6 +32,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
@@ -41,6 +44,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.text.DecimalFormat
 import java.text.SimpleDateFormat
+import java.net.HttpURLConnection
+import java.net.URL
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -101,6 +106,14 @@ class MainActivity : AppCompatActivity() {
         val smartModeToReload: SmartMode? = null
     )
 
+    private data class UpdateInfo(
+        val versionLabel: String,
+        val releaseTitle: String,
+        val notes: String,
+        val htmlUrl: String,
+        val downloadUrl: String?
+    )
+
     private enum class ActionType {
         KEEP,
         MARK_DELETE,
@@ -118,11 +131,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val worker = Executors.newSingleThreadExecutor()
+    private val imageWorker = Executors.newSingleThreadExecutor()
+    private val smartThumbWorker = Executors.newFixedThreadPool(3)
+    private val updateWorker = Executors.newSingleThreadExecutor()
     private val random = Random(System.currentTimeMillis())
     private val decimalFormat = DecimalFormat("0.#")
     private val dateFormatter = SimpleDateFormat("yyyy.MM.dd", Locale.getDefault())
     private val entryTimeFormatter = SimpleDateFormat("M月d日 HH:mm", Locale.getDefault())
     private val zoneId: ZoneId = ZoneId.systemDefault()
+    private val smartThumbCache = object : LruCache<String, Bitmap>(24 * 1024) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
+    }
 
     private lateinit var welcomeContainer: View
     private lateinit var smartContainer: View
@@ -144,6 +163,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var startButton: MaterialButton
     private lateinit var startButtonShimmer: View
     private lateinit var historyButton: MaterialButton
+    private lateinit var checkUpdateButton: MaterialButton
     private lateinit var themeToggleButton: MaterialButton
 
     private lateinit var smartBackButton: ImageButton
@@ -161,6 +181,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var viewerCounterText: TextView
     private lateinit var photoCard: View
     private lateinit var photoImageView: ImageView
+    private lateinit var swipeKeepOverlay: View
+    private lateinit var swipeDeleteOverlay: View
     private lateinit var loadingText: TextView
     private lateinit var swipeStatusText: TextView
     private lateinit var photoDateText: TextView
@@ -169,9 +191,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var photoTagsContainer: LinearLayout
     private lateinit var swipeGuideText: TextView
     private lateinit var undoButton: ImageView
-    private lateinit var deleteButton: TextView
-    private lateinit var keepButton: TextView
-    private lateinit var skipButton: TextView
+    private lateinit var deleteButton: ImageView
+    private lateinit var keepButton: ImageView
+    private lateinit var skipButton: ImageView
     private lateinit var progressBar: ProgressBar
     private lateinit var progressDoneText: TextView
     private lateinit var progressPercentText: TextView
@@ -181,6 +203,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var resultSkippedText: TextView
     private lateinit var resultFreedText: TextView
     private lateinit var resultHintText: TextView
+    private lateinit var resultBackButton: ImageButton
     private lateinit var resultDeleteButton: MaterialButton
     private lateinit var memoryButton: MaterialButton
     private lateinit var nextBatchButton: MaterialButton
@@ -210,9 +233,11 @@ class MainActivity : AppCompatActivity() {
     private var progressAnimator: ObjectAnimator? = null
     private var currentScreen: Screen = Screen.WELCOME
     private val screenBackStack = ArrayDeque<Screen>()
+    private var reviewWarmupToken = 0
     private var preparedReviewQueue: List<PhotoItem>? = null
     private var preparedFirstBitmap: Bitmap? = null
     private var preparedFirstBitmapUri: Uri? = null
+    private var updateCheckInProgress = false
 
     private val preferences by lazy { getSharedPreferences(PREFS_NAME, MODE_PRIVATE) }
     private val historyRecords = mutableListOf<HistoryRecord>()
@@ -263,6 +288,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         worker.shutdownNow()
+        imageWorker.shutdownNow()
+        smartThumbWorker.shutdownNow()
+        updateWorker.shutdownNow()
         super.onDestroy()
     }
 
@@ -287,6 +315,7 @@ class MainActivity : AppCompatActivity() {
         startButton = findViewById(R.id.startButton)
         startButtonShimmer = findViewById(R.id.startButtonShimmer)
         historyButton = findViewById(R.id.historyButton)
+        checkUpdateButton = findViewById(R.id.checkUpdateButton)
         themeToggleButton = findViewById(R.id.themeToggleButton)
 
         smartBackButton = findViewById(R.id.smartBackButton)
@@ -304,8 +333,14 @@ class MainActivity : AppCompatActivity() {
         viewerCounterText = findViewById(R.id.viewerCounterText)
         photoCard = findViewById(R.id.photoCard)
         photoImageView = findViewById(R.id.photoImageView)
+        swipeKeepOverlay = findViewById(R.id.swipeKeepOverlay)
+        swipeDeleteOverlay = findViewById(R.id.swipeDeleteOverlay)
         loadingText = findViewById(R.id.loadingText)
         swipeStatusText = findViewById(R.id.swipeStatusText)
+        swipeKeepOverlay.bringToFront()
+        swipeDeleteOverlay.bringToFront()
+        loadingText.bringToFront()
+        swipeStatusText.bringToFront()
         photoDateText = findViewById(R.id.photoDateText)
         photoNameText = findViewById(R.id.photoNameText)
         photoMetaText = findViewById(R.id.photoMetaText)
@@ -324,6 +359,7 @@ class MainActivity : AppCompatActivity() {
         resultSkippedText = findViewById(R.id.resultSkippedText)
         resultFreedText = findViewById(R.id.resultFreedText)
         resultHintText = findViewById(R.id.resultHintText)
+        resultBackButton = findViewById(R.id.resultBackButton)
         resultDeleteButton = findViewById(R.id.resultDeleteButton)
         memoryButton = findViewById(R.id.memoryButton)
         nextBatchButton = findViewById(R.id.nextBatchButton)
@@ -345,6 +381,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupListeners() {
         startButton.setOnClickListener { requestPermissionAndStartRandomReview() }
+        checkUpdateButton.setOnClickListener { checkForUpdates(userInitiated = true) }
         themeToggleButton.setOnClickListener { toggleThemeMode() }
         historyButton.setOnClickListener {
             runCatching { updateHistoryUi() }
@@ -370,6 +407,7 @@ class MainActivity : AppCompatActivity() {
         attachPressFeedback(skipButton)
         attachSwipeGesture()
 
+        resultBackButton.setOnClickListener { returnToWelcome() }
         resultDeleteButton.setOnClickListener { requestReviewDelete() }
         memoryButton.setOnClickListener {
             showToast("回忆视频功能正在准备中，会优先使用你本轮保留的照片。")
@@ -406,7 +444,7 @@ class MainActivity : AppCompatActivity() {
             if (allPhotos.isEmpty()) {
                 loadPhotos(startReviewAfter = true)
             } else {
-                prepareAndStartRandomReview(allPhotos)
+                startRandomReview()
             }
         } else {
             permissionLauncher.launch(Manifest.permission.READ_MEDIA_IMAGES)
@@ -435,7 +473,7 @@ class MainActivity : AppCompatActivity() {
                     "已读取 ${photos.size} 张照片，正在补充智能清理建议…"
                 }
                 if (startReviewAfter) {
-                    prepareAndStartRandomReview(photos)
+                    startRandomReview()
                 }
             }
 
@@ -452,6 +490,7 @@ class MainActivity : AppCompatActivity() {
                     "已读取 ${photos.size} 张照片，可随机整理，也可按建议类型集中清理。"
                 }
             }
+            preloadSmartThumbnails(insights)
         }
     }
 
@@ -496,6 +535,7 @@ class MainActivity : AppCompatActivity() {
                     openSmartMode(deleteRequest.smartModeToReload)
                 }
             }
+            preloadSmartThumbnails(insights)
         }
     }
 
@@ -507,6 +547,13 @@ class MainActivity : AppCompatActivity() {
             similar = emptyList(),
             blur = emptyList()
         )
+        preparedReviewQueue = null
+        preparedFirstBitmap = null
+        preparedFirstBitmapUri = null
+        reviewWarmupToken += 1
+        if (photos.isNotEmpty()) {
+            scheduleReviewWarmup(photos, reviewWarmupToken)
+        }
         updateWelcomeSummary()
         screenshotMetaText.text = formatSuggestionMeta(smartInsights.screenshots)
         similarMetaText.text = "分析中…"
@@ -674,34 +721,23 @@ class MainActivity : AppCompatActivity() {
         swipeGuideText.isVisible = true
     }
 
-    private fun prepareAndStartRandomReview(photos: List<PhotoItem>) {
-        if (photos.isEmpty()) {
-            showToast("还没有可整理的照片")
-            return
-        }
-        startButton.isEnabled = false
-        permissionHintText.text = "正在准备第一张照片…"
-        worker.execute {
-            val queue = buildReviewQueue(photos)
+    private fun buildReviewQueue(source: List<PhotoItem>): List<PhotoItem> {
+        return source.shuffled(random).take(min(MAX_REVIEW_BATCH, source.size))
+    }
+
+    private fun scheduleReviewWarmup(photos: List<PhotoItem>, token: Int) {
+        val snapshot = photos.toList()
+        imageWorker.execute {
+            val queue = buildReviewQueue(snapshot)
             val firstPhoto = queue.firstOrNull()
             val firstBitmap = firstPhoto?.let { loadScaledBitmap(it.uri, 1440) }
             runOnUiThread {
+                if (token != reviewWarmupToken) return@runOnUiThread
                 preparedReviewQueue = queue
                 preparedFirstBitmap = firstBitmap
                 preparedFirstBitmapUri = firstPhoto?.uri
-                startButton.isEnabled = true
-                permissionHintText.text = if (photosLoadInProgress) {
-                    "已读取 ${photos.size} 张照片，正在补充智能清理建议…"
-                } else {
-                    "已读取 ${photos.size} 张照片，可随机整理，也可按建议类型集中清理。"
-                }
-                startRandomReview()
             }
         }
-    }
-
-    private fun buildReviewQueue(source: List<PhotoItem>): List<PhotoItem> {
-        return source.shuffled(random).take(min(MAX_REVIEW_BATCH, source.size))
     }
 
     private fun bindCurrentReviewPhoto() {
@@ -716,7 +752,7 @@ class MainActivity : AppCompatActivity() {
         photoNameText.text = photo.name
         photoMetaText.text = buildMetaText(photo)
         renderPhotoTags(photo)
-        swipeStatusText.isVisible = false
+        resetSwipePreview(immediate = true)
         val preloadedBitmap = if (preparedFirstBitmapUri == photo.uri) preparedFirstBitmap else null
         loadingText.isVisible = preloadedBitmap == null
         photoImageView.setImageDrawable(null)
@@ -733,7 +769,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val token = ++imageLoadToken
-        worker.execute {
+        imageWorker.execute {
             val bitmap = loadScaledBitmap(photo.uri, 1440)
             runOnUiThread {
                 if (token != imageLoadToken) return@runOnUiThread
@@ -747,6 +783,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
         preparedReviewQueue = null
+        preparedFirstBitmap = null
+        preparedFirstBitmapUri = null
     }
 
     private fun handleReviewAction(action: ActionType, animate: Boolean = true) {
@@ -836,9 +874,12 @@ class MainActivity : AppCompatActivity() {
         smartSelectedUris.clear()
         smartTitleText.text = mode.title
         smartSubtitleText.text = "${currentSmartItems.size} 张候选"
-        populateSmartGrid()
-        updateSmartSelectionUi()
         navigateTo(Screen.SMART)
+        smartGrid.post {
+            if (currentSmartMode != mode) return@post
+            populateSmartGrid()
+            updateSmartSelectionUi()
+        }
     }
 
     private fun populateSmartGrid() {
@@ -908,10 +949,17 @@ class MainActivity : AppCompatActivity() {
         }
         frame.addView(overlay)
 
-        worker.execute {
+        val cachedBitmap = smartThumbCache.get(smartThumbKey(photo.uri))
+        if (cachedBitmap != null) {
+            image.setImageBitmap(cachedBitmap)
+            return frame
+        }
+
+        smartThumbWorker.execute {
             val bitmap = loadScaledBitmap(photo.uri, 360)
             runOnUiThread {
                 if (bitmap != null) {
+                    smartThumbCache.put(smartThumbKey(photo.uri), bitmap)
                     image.setImageBitmap(bitmap)
                 }
             }
@@ -1255,17 +1303,14 @@ class MainActivity : AppCompatActivity() {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.rawX
+                    resetSwipePreview(immediate = true)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val deltaX = event.rawX - downX
                     view.translationX = deltaX
                     view.rotation = deltaX / 45f
-                    when {
-                        deltaX > SWIPE_PREVIEW_THRESHOLD -> showSwipeStatus(ActionType.KEEP)
-                        deltaX < -SWIPE_PREVIEW_THRESHOLD -> showSwipeStatus(ActionType.MARK_DELETE)
-                        else -> swipeStatusText.isVisible = false
-                    }
+                    updateSwipePreview(deltaX)
                     true
                 }
                 MotionEvent.ACTION_UP,
@@ -1275,7 +1320,7 @@ class MainActivity : AppCompatActivity() {
                         deltaX > SWIPE_COMMIT_THRESHOLD -> handleReviewAction(ActionType.KEEP)
                         deltaX < -SWIPE_COMMIT_THRESHOLD -> handleReviewAction(ActionType.MARK_DELETE)
                         else -> {
-                            swipeStatusText.isVisible = false
+                            resetSwipePreview(immediate = false)
                             view.animate().translationX(0f).rotation(0f).setDuration(180).start()
                         }
                     }
@@ -1287,19 +1332,59 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSwipeStatus(action: ActionType) {
-        val text = when (action) {
-            ActionType.KEEP -> "保留"
-            ActionType.MARK_DELETE -> "删除"
-            ActionType.SKIP -> "跳过"
+        swipeStatusText.isVisible = false
+        when (action) {
+            ActionType.KEEP -> {
+                swipeKeepOverlay.isVisible = true
+                swipeDeleteOverlay.isVisible = false
+                swipeKeepOverlay.alpha = 1f
+                swipeDeleteOverlay.alpha = 0f
+            }
+            ActionType.MARK_DELETE -> {
+                swipeDeleteOverlay.isVisible = true
+                swipeKeepOverlay.isVisible = false
+                swipeDeleteOverlay.alpha = 1f
+                swipeKeepOverlay.alpha = 0f
+            }
+            ActionType.SKIP -> resetSwipePreview(immediate = true)
         }
-        val color = when (action) {
-            ActionType.KEEP -> getColor(R.color.accent_keep)
-            ActionType.MARK_DELETE -> getColor(R.color.accent_delete)
-            ActionType.SKIP -> getColor(R.color.accent_blue)
+    }
+
+    private fun updateSwipePreview(deltaX: Float) {
+        val normalized = (abs(deltaX) / SWIPE_COMMIT_THRESHOLD).coerceIn(0f, 1f)
+        when {
+            deltaX > 0f -> {
+                swipeKeepOverlay.isVisible = true
+                swipeDeleteOverlay.isVisible = false
+                swipeKeepOverlay.alpha = normalized
+                swipeDeleteOverlay.alpha = 0f
+            }
+            deltaX < 0f -> {
+                swipeDeleteOverlay.isVisible = true
+                swipeKeepOverlay.isVisible = false
+                swipeDeleteOverlay.alpha = normalized
+                swipeKeepOverlay.alpha = 0f
+            }
+            else -> resetSwipePreview(immediate = true)
         }
-        swipeStatusText.text = text
-        (swipeStatusText.background.mutate() as? GradientDrawable)?.setStroke(dp(2), color)
-        swipeStatusText.isVisible = true
+        swipeStatusText.isVisible = false
+    }
+
+    private fun resetSwipePreview(immediate: Boolean) {
+        swipeStatusText.isVisible = false
+        if (immediate) {
+            swipeKeepOverlay.alpha = 0f
+            swipeDeleteOverlay.alpha = 0f
+            swipeKeepOverlay.isVisible = false
+            swipeDeleteOverlay.isVisible = false
+            return
+        }
+        swipeKeepOverlay.animate().alpha(0f).setDuration(180).withEndAction {
+            swipeKeepOverlay.isVisible = false
+        }.start()
+        swipeDeleteOverlay.animate().alpha(0f).setDuration(180).withEndAction {
+            swipeDeleteOverlay.isVisible = false
+        }.start()
     }
 
     private fun loadScaledBitmap(uri: Uri, maxEdge: Int): Bitmap? {
@@ -1318,11 +1403,158 @@ class MainActivity : AppCompatActivity() {
         }.getOrNull()
     }
 
+    private fun checkForUpdates(userInitiated: Boolean) {
+        if (updateCheckInProgress) return
+        updateCheckInProgress = true
+        checkUpdateButton.isEnabled = false
+        checkUpdateButton.text = "检查中…"
+        updateWorker.execute {
+            val updateInfo = fetchLatestRelease()
+            runOnUiThread {
+                updateCheckInProgress = false
+                checkUpdateButton.isEnabled = true
+                checkUpdateButton.text = "更新"
+                when {
+                    updateInfo == null -> {
+                        if (userInitiated) {
+                            showToast("暂时无法检查更新，请稍后再试")
+                        }
+                    }
+                    isRemoteVersionNewer(updateInfo.versionLabel, readCurrentVersionName()) -> {
+                        showUpdateDialog(updateInfo)
+                    }
+                    userInitiated -> {
+                        showToast("当前已是最新版本")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun fetchLatestRelease(): UpdateInfo? {
+        return runCatching {
+            val connection = (URL(LATEST_RELEASE_API_URL).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 4000
+                readTimeout = 5000
+                setRequestProperty("Accept", "application/vnd.github+json")
+                setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+            }
+            connection.inputStream.use { input ->
+                if (connection.responseCode !in 200..299) return null
+                val payload = input.bufferedReader().use { it.readText() }
+                val json = JSONObject(payload)
+                val tagName = json.optString("tag_name")
+                val versionLabel = normalizeVersionLabel(tagName.ifBlank { json.optString("name") })
+                val htmlUrl = json.optString("html_url")
+                val notes = json.optString("body")
+                val releaseTitle = json.optString("name").ifBlank { "v$versionLabel" }
+                val assets = json.optJSONArray("assets")
+                val downloadUrl = assets?.optJSONObject(0)?.optString("browser_download_url")?.takeIf { it.isNotBlank() }
+                if (versionLabel.isBlank() || htmlUrl.isBlank()) {
+                    null
+                } else {
+                    UpdateInfo(
+                        versionLabel = versionLabel,
+                        releaseTitle = releaseTitle,
+                        notes = notes,
+                        htmlUrl = htmlUrl,
+                        downloadUrl = downloadUrl
+                    )
+                }
+            }
+        }.getOrNull()
+    }
+
+    private fun normalizeVersionLabel(raw: String): String {
+        return raw.trim().removePrefix("v").removePrefix("V").trim()
+    }
+
+    private fun isRemoteVersionNewer(remoteVersion: String, localVersion: String): Boolean {
+        val remoteParts = parseVersionParts(remoteVersion)
+        val localParts = parseVersionParts(localVersion)
+        val maxParts = max(remoteParts.size, localParts.size)
+        for (index in 0 until maxParts) {
+            val remotePart = remoteParts.getOrElse(index) { 0 }
+            val localPart = localParts.getOrElse(index) { 0 }
+            if (remotePart != localPart) {
+                return remotePart > localPart
+            }
+        }
+        return false
+    }
+
+    private fun parseVersionParts(version: String): List<Int> {
+        return Regex("\\d+").findAll(version).map { it.value.toIntOrNull() ?: 0 }.toList().ifEmpty { listOf(0) }
+    }
+
+    private fun showUpdateDialog(updateInfo: UpdateInfo) {
+        val message = buildString {
+            append("当前版本 v${readCurrentVersionName()}\n")
+            append("最新版本 v${updateInfo.versionLabel}")
+            val trimmedNotes = updateInfo.notes.trim()
+            if (trimmedNotes.isNotEmpty()) {
+                append("\n\n更新说明\n")
+                append(trimmedNotes.take(MAX_UPDATE_NOTES_LENGTH))
+                if (trimmedNotes.length > MAX_UPDATE_NOTES_LENGTH) {
+                    append("…")
+                }
+            }
+        }
+        AlertDialog.Builder(this)
+            .setTitle(updateInfo.releaseTitle)
+            .setMessage(message)
+            .setNegativeButton("稍后", null)
+            .setPositiveButton("前往下载") { _, _ ->
+                openExternalUrl(updateInfo.downloadUrl ?: updateInfo.htmlUrl)
+            }
+            .show()
+    }
+
+    private fun openExternalUrl(url: String) {
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        }.onFailure {
+            showToast("暂时无法打开下载页面")
+        }
+    }
+
+    private fun readCurrentVersionName(): String {
+        return runCatching {
+            packageManager.getPackageInfo(packageName, 0).versionName
+        }.getOrNull().orEmpty().ifBlank { "1.0" }
+    }
+
+    private fun preloadSmartThumbnails(insights: SmartInsights) {
+        (insights.screenshots + insights.similar + insights.blur)
+            .distinctBy { it.uri }
+            .take(MAX_SMART_THUMB_PRELOAD)
+            .forEach { photo ->
+                val key = smartThumbKey(photo.uri)
+                if (smartThumbCache.get(key) != null) return@forEach
+                smartThumbWorker.execute {
+                    val bitmap = loadScaledBitmap(photo.uri, 360) ?: return@execute
+                    smartThumbCache.put(key, bitmap)
+                }
+            }
+    }
+
+    private fun smartThumbKey(uri: Uri): String = "${uri}@360"
+
     private fun navigateTo(screen: Screen) {
         showScreen(screen, addToBackStack = true)
     }
 
+    private fun returnToWelcome() {
+        screenBackStack.clear()
+        showScreen(Screen.WELCOME, addToBackStack = false)
+    }
+
     private fun navigateBack(): Boolean {
+        if (currentScreen == Screen.RESULT) {
+            returnToWelcome()
+            return true
+        }
         while (screenBackStack.isNotEmpty()) {
             val previous = screenBackStack.removeLast()
             if (previous != currentScreen) {
@@ -1560,8 +1792,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        private const val LATEST_RELEASE_API_URL = "https://api.github.com/repos/DZHAPPY/PhotoCleaner/releases/latest"
         private const val MAX_REVIEW_BATCH = 20
         private const val MAX_SMART_ITEMS = 60
+        private const val MAX_SMART_THUMB_PRELOAD = 90
+        private const val MAX_UPDATE_NOTES_LENGTH = 280
         private const val MAX_BLUR_ANALYSIS = 80
         private const val SWIPE_PREVIEW_THRESHOLD = 64f
         private const val SWIPE_COMMIT_THRESHOLD = 180f
