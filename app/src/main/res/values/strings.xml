@@ -1,3 +1,25 @@
 <resources>
-    <string name="app_name">PhotoCleaner</string>
+    <string name="app_name">相册清理助手</string>
+    <string name="welcome_title">相册清理助手</string>
+    <string name="welcome_subtitle">随机回顾 · 轻松整理 · 重温回忆</string>
+    <string name="stat_total_photos">照片总数</string>
+    <string name="stat_total_size">占用空间</string>
+    <string name="stat_time_span">时间跨度</string>
+    <string name="stat_deleted_total">累计已删除 %1$d 张照片</string>
+    <string name="permission_hint">开始前需要读取系统相册。删除操作会在本轮结束后统一由系统弹窗确认。</string>
+    <string name="action_start">开始整理</string>
+    <string name="action_back">返回</string>
+    <string name="viewer_title">正在整理</string>
+    <string name="current_photo">当前照片</string>
+    <string name="loading_photo">正在加载照片…</string>
+    <string name="action_undo">撤销</string>
+    <string name="action_delete">删除</string>
+    <string name="action_keep">保留</string>
+    <string name="action_marked_for_delete">待删除</string>
+    <string name="progress_done_default">已处理 0 张</string>
+    <string name="result_title">这一轮整理完成</string>
+    <string name="result_description">你已经完成本轮照片筛选，下面可以统一删除本轮标记的照片。</string>
+    <string name="result_hint">系统会在最后一步弹出确认框，确认后照片将从相册中删除。</string>
+    <string name="action_move_to_trash">确认删除</string>
+    <string name="action_next_batch">继续整理下一批</string>
 </resources>
