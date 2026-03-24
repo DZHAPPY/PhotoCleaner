@@ -54,7 +54,7 @@
                     android:background="@drawable/bg_counter_chip"
                     android:paddingHorizontal="10dp"
                     android:paddingVertical="4dp"
-                    android:text="v1.0.1 · HyperOS 适配"
+                    android:text="v1.0.2 · HyperOS 适配"
                     android:textColor="@color/accent_keep"
                     android:textSize="10sp" />
 

@@ -152,6 +152,7 @@ class MainActivity : AppCompatActivity() {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
     }
 
+    private lateinit var mainRoot: View
     private lateinit var welcomeContainer: View
     private lateinit var smartContainer: View
     private lateinit var viewerContainer: View
@@ -299,6 +300,7 @@ class MainActivity : AppCompatActivity() {
         setupInsets()
         setupListeners()
         setupBackNavigation()
+        applyThemeEntranceAnimationIfNeeded()
         registerReceiver(
             downloadCompleteReceiver,
             IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
@@ -328,6 +330,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bindViews() {
+        mainRoot = findViewById(R.id.main)
         welcomeContainer = findViewById(R.id.welcomeContainer)
         smartContainer = findViewById(R.id.smartContainer)
         viewerContainer = findViewById(R.id.viewerContainer)
@@ -462,6 +465,22 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         )
+    }
+
+    private fun applyThemeEntranceAnimationIfNeeded() {
+        if (!intent.getBooleanExtra(EXTRA_THEME_TRANSITION, false)) return
+        mainRoot.alpha = 0f
+        mainRoot.post {
+            mainRoot.animate()
+                .alpha(1f)
+                .setDuration(THEME_TRANSITION_FADE_IN_DURATION)
+                .setInterpolator(AccelerateDecelerateInterpolator())
+                .withEndAction {
+                    intent.removeExtra(EXTRA_THEME_TRANSITION)
+                    themeToggleButton.isEnabled = true
+                }
+                .start()
+        }
     }
 
     private fun preloadWelcomeDataIfPermitted() {
@@ -1841,9 +1860,17 @@ class MainActivity : AppCompatActivity() {
         } else {
             AppCompatDelegate.MODE_NIGHT_YES
         }
-        preferences.edit().putInt(KEY_THEME_MODE, nextMode).apply()
-        AppCompatDelegate.setDefaultNightMode(nextMode)
-        updateThemeToggleText()
+        themeToggleButton.isEnabled = false
+        intent.putExtra(EXTRA_THEME_TRANSITION, true)
+        mainRoot.animate()
+            .alpha(THEME_TRANSITION_FADE_OUT_ALPHA)
+            .setDuration(THEME_TRANSITION_FADE_OUT_DURATION)
+            .setInterpolator(AccelerateDecelerateInterpolator())
+            .withEndAction {
+                preferences.edit().putInt(KEY_THEME_MODE, nextMode).apply()
+                AppCompatDelegate.setDefaultNightMode(nextMode)
+            }
+            .start()
     }
 
     private fun updateThemeToggleText() {
@@ -1922,10 +1949,14 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         private const val LATEST_RELEASE_API_URL = "https://api.github.com/repos/DZHAPPY/PhotoCleaner/releases/latest"
+        private const val EXTRA_THEME_TRANSITION = "theme_transition"
         private const val MAX_REVIEW_BATCH = 20
         private const val MAX_SMART_ITEMS = 60
         private const val MAX_SMART_THUMB_PRELOAD = 90
         private const val MAX_UPDATE_NOTES_LENGTH = 280
+        private const val THEME_TRANSITION_FADE_OUT_DURATION = 150L
+        private const val THEME_TRANSITION_FADE_IN_DURATION = 240L
+        private const val THEME_TRANSITION_FADE_OUT_ALPHA = 0.18f
         private const val MAX_BLUR_ANALYSIS = 80
         private const val SWIPE_PREVIEW_THRESHOLD = 64f
         private const val SWIPE_COMMIT_THRESHOLD = 180f
